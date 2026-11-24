@@ -1,0 +1,537 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PLAYER
+  ADMIN
+  SUPPORT
+  FINANCE
+}
+
+enum WalletTxType {
+  DEPOSIT
+  WITHDRAW
+  BET_STAKE
+  BET_WIN
+  BET_REFUND
+  CASINO_BET
+  CASINO_WIN
+  CASINO_REFUND
+  BONUS
+  ADJUSTMENT
+}
+
+enum BetslipType {
+  SINGLE
+  MULTIPLE
+}
+
+enum BetslipStatus {
+  OPEN
+  WON
+  LOST
+  VOID
+  CASHED_OUT
+}
+
+enum SelectionStatus {
+  OPEN
+  WON
+  LOST
+  VOID
+}
+
+enum EventStatus {
+  SCHEDULED
+  LIVE
+  FINISHED
+  CANCELLED
+}
+
+enum PixStatus {
+  PENDING
+  PROCESSING // saque aprovado e enviado ao gateway; aguardando a confirmação do payout
+  PAID
+  FAILED
+  EXPIRED
+}
+
+enum BannerPlacement {
+  MAIN
+  SIDE
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  displayName  String?
+  cpf          String?  @unique
+  phone        String?
+  role         Role     @default(PLAYER)
+  isActive     Boolean  @default(true)
+  isTest       Boolean  @default(false) // conta de teste: fica fora das métricas e rankings
+  createdAt    DateTime @default(now())
+  activities   UserActivity[]
+  restrictions UserRestriction[]
+  rgLimits     RgLimit[]
+  withdrawLimit UserWithdrawLimit?
+  wallet       Wallet?
+  betslips     Betslip[]
+  casinoSessions CasinoSession[]
+  pixOrders    PixOrder[]
+  kyc          KycProfile?
+  vipRewards       VipReward[]
+  cards            PlayerCard[]
+  collectionClaims CollectionClaim[]
+  loyalty          PlayerLoyalty?
+  incentives       PlayerIncentive[]
+}
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance   Decimal  @default(0)
+  bonus     Decimal  @default(0)
+  currency  String   @default("BRL")
+  updatedAt DateTime @updatedAt
+  txs       WalletTransaction[]
+}
+
+model WalletTransaction {
+  id          String       @id @default(cuid())
+  walletId    String
+  wallet      Wallet       @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  type        WalletTxType
+  amount      Decimal
+  balanceAfter Decimal
+  reference   String?
+  meta        String?
+  // cassino: jogo, rodada e id da transação no provedor (único = idempotência dos callbacks)
+  gameId      String?
+  game        Game?        @relation(fields: [gameId], references: [id])
+  roundId     String?
+  externalId  String?      @unique
+  createdAt   DateTime     @default(now())
+
+  @@index([type, createdAt])
+  @@index([gameId, createdAt])
+}
+
+model GameProvider {
+  id      String  @id @default(cuid())
+  slug    String  @unique
+  name    String
+  logoUrl String?
+  wallet  String? // carteira da PlayFivers a que o provedor pertence (só aparece no site se a carteira estiver habilitada)
+  games   Game[]
+}
+
+model Game {
+  id           String       @id @default(cuid())
+  providerId   String
+  provider     GameProvider @relation(fields: [providerId], references: [id])
+  slug         String       @unique
+  name         String
+  category     String
+  imageUrl     String?
+  hasDemo      Boolean      @default(false)
+  isLive       Boolean      @default(false)
+  isActive     Boolean      @default(true)
+  featured     Boolean      @default(false) // "Em alta" na vitrine do cassino
+  sortOrder    Int          @default(0)     // ordem de exibição (menor primeiro; empate = nome)
+  // integração que abre o jogo ("playfivers") e a chave dele no agregador ("<provedor>:<game_code>")
+  integration  String?
+  externalId   String?
+  // extras por integração em JSON (ex.: PlayFivers { "original": bool } usado no game_launch)
+  meta         String?
+  sessions     CasinoSession[]
+  walletTxs    WalletTransaction[]
+  collectionCards CollectionCard[]
+  incentiveGames  IncentiveGame[]
+  bonusTxs        BonusTransaction[]
+
+  @@unique([integration, externalId])
+}
+
+model SportEvent {
+  id          String      @id @default(cuid())
+  externalKey String?     @unique
+  league      String
+  homeTeam    String
+  awayTeam    String
+  startsAt    DateTime
+  isLive      Boolean     @default(false)
+  status      EventStatus @default(SCHEDULED)
+  result      String?
+  oddsHome    Decimal
+  oddsDraw    Decimal?
+  oddsAway    Decimal
+  settledAt   DateTime?
+  selections  BetSelection[]
+}
+
+model Betslip {
+  id              String        @id @default(cuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id])
+  type            BetslipType   @default(SINGLE)
+  stake           Decimal
+  combinedOdds    Decimal
+  potentialReturn Decimal
+  status          BetslipStatus @default(OPEN)
+  payout          Decimal?
+  clientRef       String?       @unique
+  createdAt       DateTime      @default(now())
+  settledAt       DateTime?
+  selections      BetSelection[]
+}
+
+model BetSelection {
+  id              String          @id @default(cuid())
+  betslipId       String
+  betslip         Betslip         @relation(fields: [betslipId], references: [id], onDelete: Cascade)
+  eventId         String
+  event           SportEvent      @relation(fields: [eventId], references: [id])
+  market          String          @default("1X2")
+  selection       String
+  oddsAtPlacement Decimal
+  status          SelectionStatus @default(OPEN)
+  createdAt       DateTime        @default(now())
+}
+
+model CasinoSession {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  gameId    String
+  game      Game     @relation(fields: [gameId], references: [id])
+  token       String?  @unique   // enviado ao provedor; identifica o jogador nos callbacks
+  integration String?
+  mode        String   @default("real")
+  stakeIn   Decimal  @default(0)
+  stakeOut  Decimal  @default(0)
+  rounds    Int      @default(0)
+  startedAt DateTime @default(now())
+  lastActivityAt DateTime?
+  endedAt   DateTime?
+}
+
+model PixOrder {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  kind      String
+  amount    Decimal
+  fee       Decimal   @default(0) // taxa do PSP/gateway; líquido = amount − fee (dashboard)
+  gateway   String    @default("LAB")  // PSP que processou (LAB = simulado no laboratório)
+  method    String    @default("PIX")
+  pixKey    String?   // saque: chave PIX de destino
+  pixKeyType String?  // CPF | CELULAR | EMAIL | ALEATORIA
+  status    PixStatus @default(PENDING)
+  pixCopy   String?
+  note      String?   // ex.: motivo da recusa, visível no admin
+  campaignId String?  // depósito: campanha de incentivo que o jogador escolheu (o bônus entra quando o PIX cai)
+  txid      String?   @unique
+  createdAt DateTime  @default(now())
+  paidAt    DateTime?
+}
+
+model KycProfile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  level     Int      @default(0)
+  documents String?
+  verified  Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+model AdminAuditLog {
+  id        String   @id @default(cuid())
+  adminId   String
+  action    String
+  target    String?
+  payload   String?
+  createdAt DateTime @default(now())
+}
+
+/// Acessos do jogador (login, cadastro e sessão aberta, no máximo 1 registro de sessão a cada 15 min).
+/// Base do "Usuários ativos" do dashboard.
+model UserActivity {
+  id     String   @id @default(cuid())
+  userId String
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind   String   // login | register | session
+  at     DateTime @default(now())
+  ip     String?
+  userAgent String?
+
+  @@index([at])
+  @@index([userId, at])
+}
+
+/// Proteção do jogador: autoexclusão, suspensão e bloqueio manual (histórico completo).
+/// scope GAMING = só saques liberados; TOTAL = conta bloqueada.
+model UserRestriction {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind       String    // SELF_EXCLUSION | SUSPENSION | MANUAL_BLOCK
+  scope      String    @default("GAMING")
+  reason     String
+  detail     String?
+  startsAt   DateTime  @default(now())
+  endsAt     DateTime? // null = sem prazo definido
+  createdBy  String?   // id do admin; null = o próprio jogador
+  createdAt  DateTime  @default(now())
+  changedAt  DateTime? // prazo editado ou retirada
+  revokedAt  DateTime?
+  revokedBy  String?
+  revokeNote String?
+
+  @@index([userId, createdAt])
+  @@index([kind, createdAt])
+}
+
+/// Limites de jogo responsável (depósito, valor apostado, perda líquida, tempo de sessão).
+model RgLimit {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String    // DEPOSIT | BET | LOSS | SESSION
+  period    String    // DAY | WEEK | MONTH
+  amount    Decimal   // reais (ou minutos, para SESSION)
+  createdBy String?   // id do admin; null = o próprio jogador
+  createdAt DateTime  @default(now())
+  removedAt DateTime?
+  removedBy String?
+
+  @@index([userId])
+}
+
+/// Limite de saque individual (campo vazio = herda o padrão da casa).
+model UserWithdrawLimit {
+  userId           String   @id
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  maxPerWithdrawal Decimal?
+  dailyAmount      Decimal?
+  dailyCount       Int?
+  minIntervalMin   Int?
+  updatedAt        DateTime @updatedAt
+  updatedBy        String?
+}
+
+/// Pagamentos feitos ao agregador por competência (abatem a fatura do mês).
+model InvoicePayment {
+  id        String   @id @default(cuid())
+  month     String   // AAAA-MM (competência)
+  amount    Decimal
+  paidAt    DateTime
+  note      String?
+  createdBy String
+  createdAt DateTime @default(now())
+
+  @@index([month])
+}
+
+/// Ajustes do site editáveis no admin: uma chave por recurso, valor em JSON (ex.: "winsFeed").
+model SiteSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model Banner {
+  id         String          @id @default(cuid())
+  placement  BannerPlacement @default(MAIN)
+  title      String?
+  subtitle   String?
+  imageUrl   String?
+  bgColor    String?
+  ctaText    String?
+  ctaLink    String?
+  sortOrder  Int             @default(0)
+  isActive   Boolean         @default(true)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@index([placement, isActive, sortOrder])
+}
+
+// ───────── Fidelidade: Nível VIP e Coleções (admin → Fidelidade) ─────────
+
+// Prêmio de nível VIP já resgatado (um por nível; o nível é o nome em minúsculas).
+model VipReward {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  level     String
+  amount    Decimal
+  createdAt DateTime @default(now())
+
+  @@unique([userId, level])
+}
+
+// Álbum de cartas: cada carta é um jogo do catálogo; completar o álbum dá o prêmio.
+model Collection {
+  id          String            @id @default(cuid())
+  name        String
+  description String            @default("")
+  reward      Decimal           @default(0)
+  active      Boolean           @default(true)
+  sortOrder   Int               @default(0)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  cards       CollectionCard[]
+  claims      CollectionClaim[]
+}
+
+model CollectionCard {
+  id           String       @id @default(cuid())
+  collectionId String
+  collection   Collection   @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  gameId       String
+  game         Game         @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  position     Int          @default(0)
+  owners       PlayerCard[]
+
+  @@unique([collectionId, gameId])
+}
+
+// Cartas do jogador (count = quantas vezes saiu; repetidas contam).
+model PlayerCard {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cardId    String
+  card      CollectionCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  count     Int            @default(1)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@unique([userId, cardId])
+}
+
+model CollectionClaim {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  collectionId String
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  amount       Decimal
+  createdAt    DateTime   @default(now())
+
+  @@unique([userId, collectionId])
+}
+
+// Pacotes já abertos (os ganhos vêm do valor apostado): o incremento condicional impede abrir a mais.
+model PlayerLoyalty {
+  userId      String   @id
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  packsOpened Int      @default(0)
+  updatedAt   DateTime @updatedAt
+}
+
+// ───────── Incentivos: campanhas de bônus com rollover (admin → Incentivos) ─────────
+
+/// Campanha de incentivo: quanto de bônus o jogador ganha, em que jogos o bônus vale e quanto ele precisa apostar
+/// nesses jogos (rollover) para o bônus virar saldo real.
+model IncentiveCampaign {
+  id               String    @id @default(cuid())
+  name             String
+  description      String    @default("")      // regras mostradas ao jogador
+  trigger          String                       // DEPOSIT = escolhe no depósito · CLAIM = o jogador ativa · MANUAL = só a equipe concede
+  active           Boolean   @default(true)
+  startsAt         DateTime?
+  endsAt           DateTime?
+  bonusPercent     Decimal?                     // DEPOSIT: % do depósito
+  bonusFixed       Decimal?                     // CLAIM/MANUAL: valor do bônus
+  maxBonus         Decimal?                     // DEPOSIT: teto do bônus
+  minDeposit       Decimal?                     // DEPOSIT: depósito mínimo
+  firstDepositOnly Boolean   @default(false)    // DEPOSIT: só no primeiro depósito da conta
+  requireDeposit   Boolean   @default(false)    // CLAIM: só para quem já depositou
+  rolloverTimes    Decimal                      // rollover: apostar N × a base
+  rolloverBase     String    @default("BONUS")  // BONUS | DEPOSIT_BONUS (depósito + bônus)
+  maxBet           Decimal?                     // aposta acima disso não conta para o rollover
+  maxConversion    Decimal?                     // teto do que vira saldo real ao cumprir (vazio = tudo)
+  validDays        Int       @default(7)        // prazo para cumprir, contado de quando o jogador recebe
+  maxPerPlayer     Int       @default(1)
+  sortOrder        Int       @default(0)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  games            IncentiveGame[]
+  grants           PlayerIncentive[]
+}
+
+/// Jogos da campanha: só neles o saldo de bônus pode ser apostado e só as apostas neles contam para o rollover.
+model IncentiveGame {
+  campaignId String
+  campaign   IncentiveCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  gameId     String
+  game       Game              @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  position   Int               @default(0)
+
+  @@id([campaignId, gameId])
+  @@index([gameId])
+}
+
+/// Incentivo de um jogador: bônus recebido e andamento do rollover. No máximo um ACTIVE por jogador
+/// (activeKey = userId enquanto ativo); o saldo de bônus dele fica em Wallet.bonus.
+model PlayerIncentive {
+  id             String            @id @default(cuid())
+  userId         String
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaignId     String
+  campaign       IncentiveCampaign @relation(fields: [campaignId], references: [id])
+  status         String            // ACTIVE | COMPLETED | EXPIRED | CANCELLED | LOST (bônus esgotado)
+  activeKey      String?           @unique
+  bonusAmount    Decimal
+  depositAmount  Decimal?
+  pixOrderId     String?           @unique
+  rolloverTarget Decimal
+  rolloverDone   Decimal           @default(0)
+  maxBet         Decimal?          // regras da campanha no momento em que o jogador recebeu (mudar a campanha não muda o combinado)
+  maxConversion  Decimal?
+  converted      Decimal?          // quanto virou saldo real ao cumprir
+  forfeited      Decimal?          // quanto do saldo de bônus foi retirado (expirou, cancelado, teto de conversão)
+  grantedBy      String?           // admin que concedeu; null = o jogador (depósito ou resgate)
+  note           String?
+  grantedAt      DateTime          @default(now())
+  expiresAt      DateTime
+  endedAt        DateTime?
+  endedBy        String?           // admin que cancelou; null = jogador ou sistema
+  txs            BonusTransaction[]
+
+  @@index([userId, grantedAt])
+  @@index([campaignId, status])
+  @@index([status, expiresAt])
+}
+
+/// Extrato do saldo de bônus: concessão, apostas e prêmios nos jogos da campanha, estornos, conversão e retirada.
+/// As apostas pagas com dinheiro real continuam no WalletTransaction; aqui fica a parte do bônus e o rollover.
+model BonusTransaction {
+  id          String          @id @default(cuid())
+  incentiveId String
+  incentive   PlayerIncentive @relation(fields: [incentiveId], references: [id], onDelete: Cascade)
+  type        String          // GRANT | BET | WIN | REFUND | CONVERT | FORFEIT
+  amount      Decimal         // movimento no saldo de bônus (com sinal)
+  bonusAfter  Decimal
+  stake       Decimal?        // BET: aposta inteira da rodada (dinheiro real + bônus)
+  rollover    Decimal         @default(0) // quanto o lançamento somou ao rollover (negativo no estorno)
+  gameId      String?
+  game        Game?           @relation(fields: [gameId], references: [id])
+  roundId     String?
+  externalId  String?         @unique
+  createdAt   DateTime        @default(now())
+
+  @@index([incentiveId, createdAt])
+  @@index([gameId, createdAt])
+}

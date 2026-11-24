@@ -1,0 +1,22 @@
+# Dependências e build
+node_modules/
+dist/
+
+# Segredos e configuração local (o modelo fica no .env.example)
+.env
+.env.*
+!.env.example
+
+# Banco SQLite: guarda usuários, saldos e as credenciais salvas no admin
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Ferramentas locais
+.claude/
+*.log
+.DS_Store
+Thumbs.db
+
+# uploads/ tem o próprio .gitignore (imagens enviadas e capas baixadas ficam fora)

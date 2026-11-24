@@ -1,0 +1,4 @@
+# Imagens de banner enviadas em runtime pelo admin — não versionar.
+# Mantém a pasta no repositório, ignora o conteúdo.
+*
+!.gitignore
